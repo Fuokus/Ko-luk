@@ -83,8 +83,20 @@ route('POST','/exams',async({u,b})=>{role(u,'student');const name=str(b.name,'De
   if(!rows.length)throw new E(400,'En az bir ders için sonuç girin.');rows.forEach(r=>{if(seen.has(r.subject))throw new E(400,'Bir ders yalnızca bir kez girilebilir.');seen.add(r.subject)});
   await db.tx(async t=>{const id=(await t.run('INSERT INTO exams(student_id,name,date) VALUES(?,?,?) RETURNING id',u.id,name,d)).id;for(const r of rows)await t.run('INSERT INTO exam_subjects VALUES(?,?,?,?,?)',id,r.subject,r.correct,r.wrong,r.blank)});return{ok:1}});
 route('DELETE','/exams/(\\d+)',async({u,p})=>{role(u,'student');await run('DELETE FROM exam_subjects WHERE exam_id IN(SELECT id FROM exams WHERE id=? AND student_id=?)',p[0],u.id);gone(await run('DELETE FROM exams WHERE id=? AND student_id=?',p[0],u.id),'Deneme bulunamadı.');return{ok:1}});
+// hesap yönetimi
+const needPw=(u,pw)=>{if(!check(String(pw||''),u.pw))throw new E(401,'Şifre hatalı.')};
+route('PUT','/profile',async({u,b})=>{await run('UPDATE users SET first=?,last=? WHERE id=?',str(b.first,'Ad',40),str(b.last,'Soyad',40),u.id);return{ok:1}});
+route('POST','/password',async({u,b,tok})=>{needPw(u,b.current);const n=String(b.next||'');if(n.length<8||n.length>200)throw new E(400,'Yeni şifre en az 8 karakter olmalı.');
+  await run('UPDATE users SET pw=? WHERE id=?',hash(n),u.id);await run('DELETE FROM tokens WHERE user_id=? AND token<>?',u.id,tok);return{ok:1}});
+// hesabı sil: kullanıcıya ait tüm kayıtlar veritabanından kalıcı olarak silinir
+route('POST','/account/delete',async({u,b,res})=>{needPw(u,b.password);const i=u.id;
+  await db.tx(async t=>{await t.run('DELETE FROM exam_subjects WHERE exam_id IN(SELECT id FROM exams WHERE student_id=?)',i);
+    await t.run('DELETE FROM exams WHERE student_id=?',i);await t.run('DELETE FROM sessions WHERE student_id=?',i);
+    await t.run('DELETE FROM tasks WHERE student_id=? OR coach_id=?',i,i);await t.run('DELETE FROM invitations WHERE student_id=? OR coach_id=?',i,i);
+    await t.run('DELETE FROM relations WHERE student_id=? OR coach_id=?',i,i);await t.run('DELETE FROM tokens WHERE user_id=?',i);await t.run('DELETE FROM users WHERE id=?',i)});
+  res.setHeader('Set-Cookie','sid=; Max-Age=0; Path=/');return{ok:1}});
 // ---- sunucu
-const send=(res,s,o)=>{res.writeHead(s,{'Content-Type':'application/json','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(o))};
+const send=(res,s,o)=>{res.writeHead(s,{'Content-Type':'application/json; charset=utf-8','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(o))};
 // Gövde: Vercel gövdeyi önceden ayrıştırıp req.body'ye koyabilir; yoksa akıştan okunur.
 const readBody=req=>new Promise(ok=>{const x=req.body;if(x!==undefined&&x!==null)return ok(typeof x==='string'?x:Buffer.isBuffer(x)?x.toString():Object.keys(x).length?JSON.stringify(x):'');
   let raw='';req.on('data',c=>{raw+=c;if(raw.length>1e5)req.destroy()});req.on('end',()=>ok(raw));req.on('close',()=>ok(raw))});
@@ -93,12 +105,12 @@ const server=http.createServer(async(req,res)=>{
   if(!url.pathname.startsWith('/api')){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"});return res.end(fs.readFileSync(path.join(__dirname,'index.html')))}
   const raw=await readBody(req);
   try{await db.ready;
-    const r=R.find(x=>x.m===req.method&&x.re.test(url.pathname));if(!r)throw new E(404,'Sayfa bulunamadı.');
+    const r=R.find(x=>x.m===req.method&&x.re.test(url.pathname));if(!r){const er=new E(404,'Sayfa bulunamadı.');if(process.env.VERCEL)er.dbg={url:req.url,q:req.query};throw er}
     let b={};if(raw){if(!(req.headers['content-type']||'').includes('application/json'))throw new E(415,'Geçersiz istek.');try{b=JSON.parse(raw)}catch{throw new E(400,'Geçersiz istek.')}}
     const tok=((req.headers.cookie||'').match(/(?:^|; )sid=([a-f0-9]+)/)||[])[1];let u=null;
     if(tok)u=await one('SELECT u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token=? AND t.exp>?',tok,Date.now())||null;
     if(r.auth&&!u)throw new E(401,'Devam etmek için giriş yapın.');
     send(res,200,await r.f({u,b,res,tok,p:url.pathname.match(r.re).slice(1)}))
-  }catch(e){if(!(e instanceof E))console.error(e);send(res,e.s||500,{error:e instanceof E?e.message:'Bir hata oluştu. Lütfen tekrar deneyin.'})}});
+  }catch(e){if(!(e instanceof E))console.error(e);send(res,e.s||500,{error:e instanceof E?e.message:'Bir hata oluştu. Lütfen tekrar deneyin.',...(e.dbg?{dbg:e.dbg}:{})})}});
 if(require.main===module)server.listen(process.env.PORT||3000,()=>console.log('http://localhost:'+(process.env.PORT||3000)));
 module.exports=server;
