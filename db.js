@@ -13,7 +13,7 @@ function sqlite(){const{DatabaseSync}=require('node:sqlite');const d=new Databas
   const db={all:async(s,...p)=>d.prepare(s).all(...p),one:async(s,...p)=>d.prepare(s).get(...p),exec:async s=>d.exec(s),
     run:async(s,...p)=>{if(/returning/i.test(s)){const r=d.prepare(s).all(...p);return{id:r[0]&&r[0].id,changes:r.length}}return{changes:Number(d.prepare(s).run(...p).changes)}}};
   db.tx=f=>{const r=lock.then(async()=>{d.exec('BEGIN');try{const v=await f(db);d.exec('COMMIT');return v}catch(e){d.exec('ROLLBACK');throw e}});lock=r.catch(()=>{});return r};return db}
-function pg(url){const{Pool}=require('pg');const pool=new Pool({connectionString:url,max:5});pool.on('error',e=>console.error(e.message));
+function pg(url){const{Pool}=require('pg');const pool=new Pool({connectionString:url,max:process.env.VERCEL?1:5});pool.on('error',e=>console.error(e.message));
   const conv=s=>{let i=0;return s.replace(/\?/g,()=>'$'+(++i))};
   const mk=x=>({all:async(s,...p)=>(await x.query(conv(s),p)).rows,one:async(s,...p)=>(await x.query(conv(s),p)).rows[0],exec:async s=>{await x.query(s)},
     run:async(s,...p)=>{const r=await x.query(conv(s),p);return{id:r.rows[0]&&r.rows[0].id,changes:r.rowCount}}});

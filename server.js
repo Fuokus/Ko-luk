@@ -18,14 +18,18 @@ const pub=u=>({id:u.id,role:u.role,first:u.first,last:u.last,code:u.code,email:u
 async function newCode(){for(;;){const c='OGR-'+crypto.randomInt(100000,1000000);if(!await one('SELECT 1 FROM users WHERE code=?',c))return c}}
 async function login(res,u){const t=crypto.randomBytes(32).toString('hex');await run('INSERT INTO tokens VALUES(?,?,?)',t,u.id,Date.now()+7*864e5);res.setHeader('Set-Cookie',`sid=${t}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${7*86400}${process.env.COOKIE_SECURE?'; Secure':''}`)}
 // ---- yetkilendirme: öğrenci verisine yalnızca kendisi veya bağlı koçu erişir (aksi halde 404)
-async function access(u,sid){const n=sid==='me'?u.id:Number(sid);const s=Number.isInteger(n)&&n>0&&n<2e9?await one("SELECT * FROM users WHERE id=? AND role='student'",n):null;
-  if(s&&(s.id===u.id||(u.role==='coach'&&await one('SELECT 1 FROM relations WHERE student_id=? AND coach_id=?',s.id,u.id))))return s;throw new E(404,'Kayıt bulunamadı.')}
+async function access(u,sid){const n=sid==='me'?u.id:Number(sid);
+  // tek sorgu: öğrencinin kendisi ya da bağlı koçu
+  const s=Number.isInteger(n)&&n>0&&n<2e9?await one("SELECT s.* FROM users s WHERE s.id=? AND s.role='student' AND (s.id=? OR EXISTS(SELECT 1 FROM relations r WHERE r.student_id=s.id AND r.coach_id=?))",n,u.id,u.id):null;
+  if(s)return s;throw new E(404,'Kayıt bulunamadı.')}
 const role=(u,r)=>{if(u.role!==r)throw new E(403,'Bu işlem için yetkiniz yok.')};
 async function data(s){const t=today();
-  const tasks=(await all('SELECT * FROM tasks WHERE student_id=? ORDER BY due',s.id)).map(x=>({...x,status:x.status!=='done'&&x.due<t?'expired':x.status}));
-  const exams=await Promise.all((await all('SELECT * FROM exams WHERE student_id=? ORDER BY date,id',s.id)).map(async e=>({...e,subjects:(await all('SELECT subject,correct,wrong,blank FROM exam_subjects WHERE exam_id=?',e.id)).map(r=>({...r,net:cfg.net(r.correct,r.wrong)}))})));
-  exams.forEach(e=>e.net=Math.round(e.subjects.reduce((a,r)=>a+r.net,0)*100)/100);
-  return{student:pub(s),sessions:await all('SELECT * FROM sessions WHERE student_id=? ORDER BY date DESC,id DESC',s.id),tasks,exams}}
+  const[tk,ex,subs,sessions]=await Promise.all([all('SELECT * FROM tasks WHERE student_id=? ORDER BY due',s.id),all('SELECT * FROM exams WHERE student_id=? ORDER BY date,id',s.id),
+    all('SELECT es.* FROM exam_subjects es JOIN exams e ON e.id=es.exam_id WHERE e.student_id=?',s.id),all('SELECT * FROM sessions WHERE student_id=? ORDER BY date DESC,id DESC',s.id)]);
+  const tasks=tk.map(x=>({...x,status:x.status!=='done'&&x.due<t?'expired':x.status}));
+  const exams=ex.map(e=>{const subjects=subs.filter(r=>r.exam_id===e.id).map(({exam_id,...r})=>({...r,net:cfg.net(r.correct,r.wrong)})).sort((p,q)=>cfg.subjects.indexOf(p.subject)-cfg.subjects.indexOf(q.subject));
+    return{...e,subjects,net:Math.round(subjects.reduce((x,r)=>x+r.net,0)*100)/100}});
+  return{student:pub(s),sessions,tasks,exams}}
 // ---- rotalar
 const R=[];const route=(m,p,f,auth=true)=>R.push({m,re:new RegExp('^/api'+p+'$'),f,auth});
 const gone=(r,m)=>{if(!r.changes)throw new E(404,m)};
@@ -57,6 +61,10 @@ route('POST','/invites/(\\d+)/respond',async({u,p,b})=>{role(u,'student');const 
 // koç: öğrenci listesi ve detay
 route('GET','/students',async({u})=>{role(u,'coach');return Promise.all((await all('SELECT s.* FROM relations r JOIN users s ON s.id=r.student_id WHERE r.coach_id=? ORDER BY s.first',u.id)).map(data))});
 route('GET','/students/(\\w+)',async({u,p})=>data(await access(u,p[0])));
+// koç, öğrenciyi koçluğundan çıkarır: bağlantı ve bu koçun verdiği görevler silinir; öğrencinin çalışma/deneme kayıtları öğrencide kalır
+route('DELETE','/students/(\\d+)',async({u,p})=>{role(u,'coach');const st=await access(u,p[0]);
+  await db.tx(async t=>{await t.run('DELETE FROM relations WHERE student_id=? AND coach_id=?',st.id,u.id);await t.run('DELETE FROM tasks WHERE student_id=? AND coach_id=?',st.id,u.id);
+    await t.run("UPDATE invitations SET status='ended' WHERE student_id=? AND coach_id=? AND status='accepted'",st.id,u.id)});return{ok:1}});
 // çalışma kayıtları (yalnızca öğrenci kendi kaydını yazar)
 const sess=b=>({date:date(b.date),subject:subj(b.subject),topic:str(b.topic,'Konu'),minutes:int(Number(b.hours||0)*60+Number(b.mins||0),'Süre (dakika)',cfg.maxMinutes,1),...qs(b)});
 const sv=o=>[o.date,o.subject,o.topic,o.minutes,o.total,o.correct,o.wrong,o.blank];
@@ -77,17 +85,20 @@ route('POST','/exams',async({u,b})=>{role(u,'student');const name=str(b.name,'De
 route('DELETE','/exams/(\\d+)',async({u,p})=>{role(u,'student');await run('DELETE FROM exam_subjects WHERE exam_id IN(SELECT id FROM exams WHERE id=? AND student_id=?)',p[0],u.id);gone(await run('DELETE FROM exams WHERE id=? AND student_id=?',p[0],u.id),'Deneme bulunamadı.');return{ok:1}});
 // ---- sunucu
 const send=(res,s,o)=>{res.writeHead(s,{'Content-Type':'application/json','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(o))};
-const server=http.createServer((req,res)=>{
+// Gövde: Vercel gövdeyi önceden ayrıştırıp req.body'ye koyabilir; yoksa akıştan okunur.
+const readBody=req=>new Promise(ok=>{const x=req.body;if(x!==undefined&&x!==null)return ok(typeof x==='string'?x:Buffer.isBuffer(x)?x.toString():Object.keys(x).length?JSON.stringify(x):'');
+  let raw='';req.on('data',c=>{raw+=c;if(raw.length>1e5)req.destroy()});req.on('end',()=>ok(raw));req.on('close',()=>ok(raw))});
+const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://x');
   if(!url.pathname.startsWith('/api')){res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','X-Frame-Options':'DENY','Content-Security-Policy':"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"});return res.end(fs.readFileSync(path.join(__dirname,'index.html')))}
-  let raw='';req.on('data',c=>{raw+=c;if(raw.length>1e5)req.destroy()});
-  req.on('end',async()=>{try{await db.ready;
+  const raw=await readBody(req);
+  try{await db.ready;
     const r=R.find(x=>x.m===req.method&&x.re.test(url.pathname));if(!r)throw new E(404,'Sayfa bulunamadı.');
     let b={};if(raw){if(!(req.headers['content-type']||'').includes('application/json'))throw new E(415,'Geçersiz istek.');try{b=JSON.parse(raw)}catch{throw new E(400,'Geçersiz istek.')}}
     const tok=((req.headers.cookie||'').match(/(?:^|; )sid=([a-f0-9]+)/)||[])[1];let u=null;
     if(tok)u=await one('SELECT u.* FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token=? AND t.exp>?',tok,Date.now())||null;
     if(r.auth&&!u)throw new E(401,'Devam etmek için giriş yapın.');
     send(res,200,await r.f({u,b,res,tok,p:url.pathname.match(r.re).slice(1)}))
-  }catch(e){if(!(e instanceof E))console.error(e);send(res,e.s||500,{error:e instanceof E?e.message:'Bir hata oluştu. Lütfen tekrar deneyin.'})}})});
+  }catch(e){if(!(e instanceof E))console.error(e);send(res,e.s||500,{error:e instanceof E?e.message:'Bir hata oluştu. Lütfen tekrar deneyin.'})}});
 if(require.main===module)server.listen(process.env.PORT||3000,()=>console.log('http://localhost:'+(process.env.PORT||3000)));
 module.exports=server;

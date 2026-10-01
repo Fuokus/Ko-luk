@@ -23,4 +23,8 @@ assert.equal((await C2('GET','/students/'+sid)).s,404,'başka koç');assert.equa
 assert.equal((await S2('DELETE','/sessions/1')).s,404,'başkasının kaydını silemez');assert.equal((await S2('GET','/students')).s,403);assert.equal((await C2('GET','/students')).j.length,0);
 assert.equal((await S('GET','/me')).j.coach,'Ece K');assert.equal((await mk()('GET','/students')).s,401);
 assert.equal((await mk()('POST','/login',{email:'a@x.com',password:'yanlis'})).s,401);
+assert.equal((await S('DELETE','/students/'+sid)).s,403,'öğrenci çıkaramaz');assert.equal((await C2('DELETE','/students/'+sid)).s,404,'başka koç çıkaramaz');
+assert.equal((await C('DELETE','/students/'+sid)).s,200);assert.equal((await C('GET','/students/'+sid)).s,404,'çıkarılınca erişim yok');assert.equal((await C('GET','/students')).j.length,0);
+const mine=(await S('GET','/students/me')).j;assert.equal(mine.sessions.length,1,'kayıtlar öğrencide kalır');assert.equal(mine.tasks.length,0,'koçun görevleri silinir');assert.equal(mine.exams.length,1);
+assert.equal((await C2('POST','/invites',{code})).s,200,'yeni koç davet edebilir');
 console.log('TÜM TESTLER GEÇTİ')}catch(x){console.error('HATA',x.message,x.stack.split('\n')[1]);process.exitCode=1}srv.close()});
