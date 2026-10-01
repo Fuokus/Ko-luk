@@ -2,14 +2,10 @@ services:
   - type: web
     name: kocluk-takip
     runtime: node
-    plan: starter        # kalıcı disk için ücretli plan gerekir
-    buildCommand: "true"
+    plan: free
+    buildCommand: npm install
     startCommand: npm start
     envVars:
       - {key: NODE_VERSION, value: "22"}
-      - {key: DB, value: /data/data.db}
       - {key: COOKIE_SECURE, value: "1"}
-    disk:
-      name: veri
-      mountPath: /data
-      sizeGB: 1
+      - {key: DATABASE_URL, sync: false}
