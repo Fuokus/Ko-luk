@@ -1,5 +1,5 @@
 {
   "regions": ["iad1"],
-  "functions": {"api/index.js": {"includeFiles": "index.html"}},
-  "rewrites": [{"source": "/:path*", "destination": "/api/index.js?__p=:path*"}]
+  "functions": {"api/*.js": {"includeFiles": "index.html"}},
+  "rewrites": [{"source": "/", "destination": "/api/index.js"}]
 }
